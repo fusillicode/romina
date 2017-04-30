@@ -1,52 +1,61 @@
 defmodule DirLister do
   use GenServer
 
-  def start_link(dir) do
-    GenServer.start_link(__MODULE__, dir)
-  end
+  def start_link(item), do: GenServer.start_link(__MODULE__, item)
+  def run(pid), do: GenServer.cast(pid, :run)
 
-  def init(dir) do
-    IO.puts "DIR: #{dir} #{inspect(self)}"
-    with {:ok, dir_contents} <- dir |> :file.list_dir,
+  def init(item), do: {:ok, item}
+
+  def handle_cast(:run, item) do
+    IO.puts "DIR: #{item}"
+    with {:ok, dir_contents}        <- item |> :file.list_dir,
         %{true: files, false: dirs} <- dir_contents
-          |> Enum.map(&("#{dir}/#{&1}"))
+          |> Enum.map(&("#{item}/#{&1}"))
           |> Enum.group_by(&File.regular?(&1))
           |> (&(Map.merge(%{true: [], false: []}, &1))).(),
-        {:ok, _pid} <- Supervisor.start_link(Ultravisor, [items: files, worker_module: FileRenamer]),
-        {:ok, _pid} <- Supervisor.start_link(Ultravisor, [items: dirs, worker_module: DirLister]) do
-      {:ok, dir}
+        %{ok: pids, error: []} <- Ultravisor.start_link(items: files, worker_module: FileRenamer),
+        %{ok: pids, error: []} <- Ultravisor.start_link(items: dirs, worker_module: DirLister) do
+      {:noreply, :item}
     else
       {:error, :enoent}  -> IO.puts("Can't find what your looking for 😞'")
       {:error, :enotdir} -> IO.puts("This is not a directory! 😡'")
     end
   end
+
+  def terminate(:normal, item), do: IO.puts "DIR: done with #{item}!"
 end
 
 defmodule FileRenamer do
   use GenServer
 
-  def start_link(file) do
-    GenServer.start_link(__MODULE__, file)
+  def start_link(item), do: GenServer.start_link(__MODULE__, item)
+  def run(pid), do: GenServer.cast(pid, :run)
+
+  def init(item), do: {:ok, item}
+
+  def handle_cast(:run, item) do
+    IO.puts "FILE: #{item}"
+    {:stop, :normal, item}
   end
 
-  def init(file) do
-    IO.puts "FILE: #{file}"
-    {:ok, file}
-  end
+  def terminate(:normal, item), do: IO.puts "FILE: done with #{item}!"
 end
 
 defmodule Ultravisor do
   use Supervisor
 
-  def start_link(arg) do
-    Supervisor.start_link(__MODULE__, arg)
+  def start_link(items: items, worker_module: worker_module) do
+    IO.puts "Ultravisor #{worker_module} started"
+    {:ok, pid} = Supervisor.start_link(__MODULE__, worker_module)
+    items |> Enum.reduce(%{ok: [], error: []}, fn(item, acc) ->
+      {result_atom, pid} = Supervisor.start_child(pid, [item])
+      worker_module.run(pid)
+      {_, acc} = Map.get_and_update(acc, result_atom, &{&1, [pid|&1]})
+      acc
+    end)
   end
 
-  def init([items: items, worker_module: worker_module]) do
-    items
-      |> Enum.map(fn (item) ->
-        worker(worker_module, [item], [id: "#{worker_module}_#{item}"])
-      end)
-      |> supervise(strategy: :one_for_one)
+  def init(worker_module) do
+    supervise([worker(worker_module, [], restart: :transient)], strategy: :simple_one_for_one)
   end
 end
